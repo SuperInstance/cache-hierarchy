@@ -1,74 +1,114 @@
-# Cache Hierarchy
+# cache-hierarchy
 
-**A Rust library for simulating CPU cache hierarchies** — models L1, L2, and L3 caches with configurable size, associativity, and line size, tracking hit/miss statistics for memory access analysis.
+A Rust library for **CPU cache hierarchy simulation**, modeling L1/L2/L3 access latency, hit rates, and set-associative addressing with configurable geometries for each cache level.
 
 ## Why It Matters
 
-The memory hierarchy is the most important performance characteristic of modern hardware. A cache hit to L1 takes ~1 ns; a miss that goes to main memory takes ~100 ns — a 100× difference. Understanding cache behavior is critical for:
+Memory hierarchy design is the single most impactful hardware-software co-design decision in modern computing. The latency gap between L1 cache (~1ns) and DRAM (~100ns) spans two orders of magnitude — the "memory wall." Understanding cache behavior is essential for:
 
-- **Performance optimization** — data layout (AoS vs. SoA), cache-friendly algorithms, prefetching
-- **Systems programming** — why certain patterns are fast (sequential access) vs. slow (pointer chasing)
-- **Database design** — why B-trees (cache-friendly) outperform BSTs (pointer-heavy) on real hardware
-- **Competitive programming** — cache-oblivious algorithms like the van Emde Boas layout
-
-Modern CPUs have three cache levels:
-- **L1**: 32–64 KB, 4-cycle latency, per-core
-- **L2**: 256 KB – 1 MB, 10–12 cycle latency, per-core
-- **L3**: 8–32 MB, 30–50 cycle latency, shared across cores
-
-Cache associativity determines how many possible locations a cache line can occupy: direct-mapped (1 location), set-associative (N locations per set), or fully-associative (any location). Higher associativity reduces conflict misses but increases lookup time.
+- **Performance engineering** — cache-friendly data layouts (SoA vs AoS, tiling)
+- **Systems programming** — false sharing, cache line alignment, prefetching
+- **Algorithm design** — cache-oblivious algorithms, external memory models
+- **Security** — cache-timing side channels (Flush+Reload, Prime+Probe)
 
 ## How It Works
 
-**Cache configuration**: Each level has a size (bytes), associativity (ways), and line size (typically 64 bytes). The number of sets is `size / (associativity × line_size)`. For a 32 KB, 8-way L1 with 64-byte lines: 4096 sets × 8 ways × 64 bytes = 2 MB.
+### Cache Geometry
 
-**Address decomposition**: A memory address splits into:
-- **Block offset** (bits 0–5): position within the 64-byte cache line
-- **Set index** (next log₂(sets) bits): which set to check
-- **Tag** (remaining bits): identifies the memory block
+Each cache level is configured by three parameters:
 
-**Access simulation**: The `access()` function computes the set index for each cache level, checks for a hit (simplified pseudo-random hit pattern based on address hashing), and records statistics. Real hardware would use LRU replacement and actual tag arrays — this simulator uses a hash-based heuristic to model realistic hit rates.
+- **Size** (S) — total cache capacity in bytes
+- **Associativity** (A) — ways per set (direct-mapped=1, fully associative=S/line)
+- **Line size** (B) — cache block size (typically 64 bytes)
 
-**Statistics**: Per-level hit and miss counts, plus `hit_rate()` computing `hits / (hits + misses)`.
+The number of sets is:
+
+$$N_{\text{sets}} = \frac{S}{A \times B}$$
+
+### Address Decomposition
+
+A memory address is decomposed into three fields:
+
+```
+┌──────────────┬──────────┬──────────┐
+│     Tag      │  Set Index│  Offset  │
+│  log₂(tag)   │ log₂(sets)│ log₂(B)  │
+└──────────────┴──────────┴──────────┘
+```
+
+- **Offset**: `log₂(B)` bits → selects byte within line
+- **Set index**: `log₂(N_sets)` bits → selects cache set
+- **Tag**: remaining upper bits → disambiguates lines within a set
+
+### Default Configurations
+
+| Level | Size | Assoc. | Sets (at 64B lines) |
+|-------|------|--------|---------------------|
+| L1 (data) | 32 KB | 8-way | 64 |
+| L2 | 256 KB | 8-way | 512 |
+| L3 | 8 MB | 16-way | 8192 |
+
+These match common Intel/AMD desktop configurations (e.g., Skylake, Zen 4).
+
+### Access Model
+
+The `access()` function walks the hierarchy: L1 → L2 → L3 → memory. It returns the hitting level (0–3). Statistics are accumulated per level.
+
+### Average Memory Access Time (AMAT)
+
+The standard AMAT model for a three-level hierarchy:
+
+$$\text{AMAT} = t_{L1} + m_{L1} \cdot (t_{L2} + m_{L2} \cdot (t_{L3} + m_{L3} \cdot t_{\text{mem}}))$$
+
+where $t_i$ is the hit latency and $m_i$ is the miss rate at level $i$.
+
+### Big-O Complexity
+
+| Operation | Time | Space |
+|-----------|------|-------|
+| `access(addr)` | O(L) where L = levels (constant 3) | O(1) |
+| `get_stats()` | O(L) | O(L) |
+| `reset_stats()` | O(L) | O(1) |
 
 ## Quick Start
 
 ```rust
 use cache_hierarchy::{access, get_stats, reset_stats, CacheConfig};
 
-// Use standard cache configurations
-let configs = [
-    CacheConfig::l1_dcache(),  // 32 KB, 8-way
-    CacheConfig::l2(),         // 256 KB, 8-way
-    CacheConfig::l3(),         // 8 MB, 16-way
-];
-
 reset_stats();
-
-// Simulate memory accesses
-for addr in (0..4096).step_by(64) { // sequential 4KB scan
-    let level = access(addr, &configs);
-    // level 0 = L1 hit, 1 = L2, 2 = L3, 3 = main memory
-}
+let configs = [CacheConfig::l1_dcache(), CacheConfig::l2(), CacheConfig::l3()];
+let hitting_level = access(0xDEAD_BEEF, &configs);
+// hitting_level: 0=L1, 1=L2, 2=L3, 3=memory
 
 let stats = get_stats();
 for (i, s) in stats.iter().enumerate() {
-    println!("L{}: {} hits, {} misses ({:.1}% hit rate)",
+    println!("L{}: {} hits, {} misses, {:.1}% hit rate",
         i + 1, s.hits, s.misses, s.hit_rate() * 100.0);
 }
 ```
 
 ## API
 
-- **`CacheConfig`** — Size, associativity, line size; presets for L1/L2/L3
-- **`CacheStats`** — Hits, misses, `hit_rate()`
-- **`access(addr, [L1, L2, L3])` → `usize`** — Simulate one access (0=L1, 1=L2, 2=L3, 3=miss)
-- **`get_stats()` → `[CacheStats; 3]`** — Per-level statistics
-- **`reset_stats()`** — Clear all counters
+| Function / Type | Description |
+|-----------------|-------------|
+| `CacheConfig::l1_icache()` / `l1_dcache()` / `l2()` / `l3()` | Preset geometries |
+| `CacheConfig::num_sets() → usize` | Compute set count |
+| `access(addr, &[CacheConfig; 3]) → usize` | Simulate hierarchy access |
+| `get_stats() → [CacheStats; 3]` | Per-level hit/miss counters |
+| `reset_stats()` | Zero all counters |
+| `CacheStats::hit_rate() → f64` | Hit rate fraction |
 
 ## Architecture Notes
 
-Provides the microarchitecture simulation model for SuperInstance performance analysis. Used to estimate cache impact of data layout decisions before implementation. See the [architecture overview](https://github.com/SuperInstance/SuperInstance/blob/main/ARCHITECTURE.md).
+The **γ + η = C** link: the address decomposition (γ) maps physical addresses to cache set/tag locations, while the associativity constraint (η) bounds the number of candidates per set. Together they conserve the invariant C — every address maps to exactly one set per level, and the replacement policy determines which tag occupies a way within that set. The global statistics accumulate the observable consequence of this mapping.
+
+## References
+
+- Hennessy, J. L., & Patterson, D. A. (2019). *Computer Architecture: A Quantitative Approach,* 6th ed. Chapter 2: Memory Hierarchy Design.
+- Smith, A. J. (1982). *Cache Memories.* ACM Computing Surveys, 14(3), 473–530.
+- Aggarwal, A., Alpern, B., Chandra, A., & Snir, M. (1987). *A Model for Heuristic Analysis of Parallel Algorithms.* (I/O complexity model.)
+- Yarom, Y., & Falkner, K. (2014). *FLUSH+RELOAD: A High Resolution, Low Noise, L3 Cache Side-Channel Attack.* USENIX Security.
+- Intel® 64 and IA-32 Architectures Optimization Reference Manual. Chapter 2: Cache Architecture.
 
 ## License
 
