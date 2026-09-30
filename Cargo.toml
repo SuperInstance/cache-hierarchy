@@ -1,10 +1,12 @@
 [package]
 name = "cache-hierarchy"
 version = "0.1.0"
-description = "A Rust library for Cache Hierarchy"
+description = "Cache Hierarchy — Rust implementation with the SuperInstance polyformalism canary wired in."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/casey-digennaro/cache-hierarchy"
+repository = "https://github.com/SuperInstance/cache-hierarchy"
 edition = "2021"
+
+keywords = ["cache-hierarchy"]
 
 [dependencies]
 lazy_static = "1"
